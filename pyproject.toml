@@ -1,0 +1,27 @@
+[project]
+name = "wptinference"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Andrea", email = "donazzan.andre@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "polars>=2.1.0",
+    "scipy>=1.18.1",
+]
+
+[project.scripts]
+wptinference = "wptinference:main"
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
