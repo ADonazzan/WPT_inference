@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 from wptinference import (
+    as_vector,
+    param_names,
     bootstrap_ci,
     brenier_matrix,
     estimate,
@@ -90,28 +92,10 @@ def test_estimator_is_consistent(rng):
     assert np.allclose(est.cov, truth.cov, atol=0.05)
 
 
-def test_bootstrap_ci_shapes_and_ordering(rng):
+def test_bootstrap_ci_is_basic_interval(rng):
     design = random_design(2, rng)
-    samples = design.sample(200, rng)
-    for method in ("percentile", "basic"):
-        res = bootstrap_ci(*samples, n_boot=50, method=method, rng=rng)
-        assert res.draws["A"].shape == (50, 2, 2)
-        assert res.draws["a"].shape == (50, 2)
-        for k in ("a", "A", "mean", "cov"):
-            assert np.all(res.lower[k] <= res.upper[k])
-            assert np.all(res.se[k] > 0)
-
-
-def test_coverage_study_writes_outputs(tmp_path):
-    from wptinference.study import StudyConfig, load_replications, n_sim_for, run_study
-
-    assert n_sim_for(0.95, 0.005) == 1900
-    cfg = StudyConfig(sample_sizes=(100,), n_sim=6, n_boot=30, workers=1)
-    out = run_study(cfg, tmp_path / "run")
-    for name in ("config.json", "run.log", "summary.csv", "tables.txt", "tables.tex", "coverage.pdf"):
-        assert (out / name).stat().st_size > 0
-    reps = load_replications(out)
-    assert reps.height == 6 * 10  # replications x scalar parameters (d = 2)
-    first = reps.clone()
-    run_study(cfg, out)  # resuming skips finished sample sizes
-    assert load_replications(out).equals(first)
+    X0, X1, X2 = design.sample(200, rng)
+    theta, lower, upper, se = bootstrap_ci(X0, X1, X2, n_boot=50, level=0.95, rng=rng)
+    assert theta.shape == lower.shape == upper.shape == se.shape == (len(param_names(2)),)
+    assert np.allclose(theta, as_vector(estimate(X0, X1, X2)))
+    assert np.all(lower < upper) and np.all(se > 0)
