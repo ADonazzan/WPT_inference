@@ -12,6 +12,7 @@ import os
 os.environ["OMP_NUM_THREADS"] = "1"  # one BLAS thread per worker process
 
 import logging
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -21,7 +22,7 @@ import polars as pl
 from wptinference import as_vector, bootstrap_ci, param_names, random_design
 
 # ----------------------------------------------------------------- setup ----
-D = 2                                   # dimension
+D = 20                                   # dimension
 SAMPLE_SIZES = [250, 500, 1000, 2000]   # n, the same for all three samples
 N_SIM = 2000                            # Monte Carlo replications per n
 N_BOOT = 1000                           # bootstrap resamples per replication
@@ -37,7 +38,10 @@ def one_replication(task):
     design, n, seed = task
     rng = np.random.default_rng(seed)
     X0, X1, X2 = design.sample(n, rng)
-    return bootstrap_ci(X0, X1, X2, N_BOOT, LEVEL, rng)
+    start = time.perf_counter()
+    theta_hat, lower, upper, boot_se = bootstrap_ci(X0, X1, X2, N_BOOT, LEVEL, rng)
+    seconds = time.perf_counter() - start   # one full bootstrap: N_BOOT resamples
+    return theta_hat, lower, upper, boot_se, seconds
 
 
 def main():
@@ -57,7 +61,7 @@ def main():
     log(f"d={D}  n={SAMPLE_SIZES}  n_sim={N_SIM}  n_boot={N_BOOT}  level={LEVEL}  workers={WORKERS}")
     log(f"Monte Carlo SE of the coverage estimates: {mcse:.4f}")
 
-    replications, summary = [], []
+    replications, summary, timing = [], [], []
     seeds = np.random.SeedSequence(SEED).spawn(len(SAMPLE_SIZES))
     for n, seed in zip(SAMPLE_SIZES, seeds):
         tasks = [(design, n, s) for s in seed.spawn(N_SIM)]
@@ -68,8 +72,11 @@ def main():
                 if len(results) % max(1, N_SIM // 10) == 0:
                     log(f"n={n}: {len(results)}/{N_SIM} replications")
 
-        # Each array has shape (N_SIM, number of parameters).
-        est, lower, upper, boot_se = (np.array(x) for x in zip(*results))
+        # Arrays of shape (N_SIM, number of parameters); seconds has shape (N_SIM,).
+        est, lower, upper, boot_se, seconds = (np.array(x) for x in zip(*results))
+        log(f"n={n}: {seconds.mean():.2f}s per bootstrap (sd {seconds.std(ddof=1):.2f}s)")
+        timing.append({"d": D, "n": n, "n_boot": N_BOOT, "mean_s": seconds.mean(),
+                       "sd_s": seconds.std(ddof=1), "median_s": np.median(seconds)})
 
         replications.append(pl.DataFrame({
             "n": n,
@@ -95,16 +102,31 @@ def main():
 
     pl.concat(replications).write_parquet(OUT / "replications.parquet")
     summary = pl.concat(summary)
-    summary.write_csv(OUT / "summary.csv")
+    summary.write_csv(OUT / "summary.csv")      # one row per (n, parameter)
+    pl.DataFrame(timing).write_csv(OUT / "timing.csv")
 
-    log(f"Results ({N_SIM} replications, {N_BOOT} resamples, nominal {LEVEL}, MC SE {mcse:.4f}):")
-    log(f"{'n':>5}  {'param':<9}{'truth':>8}{'bias':>9}{'rmse':>8}{'emp_se':>8}{'boot_se':>9}{'cover':>7}{'length':>8}")
-    for r in summary.iter_rows(named=True):
-        log(
-            f"{r['n']:>5}  {r['param']:<9}{r['truth']:>8.3f}{r['bias']:>+9.4f}{r['rmse']:>8.4f}"
-            f"{r['emp_se']:>8.4f}{r['boot_se']:>9.4f}{r['coverage']:>7.3f}{r['ci_length']:>8.3f}"
+    # Printed table: parameters grouped into blocks (a, A, mean, cov).
+    blocks = (
+        summary.with_columns(block=pl.col("param").str.replace(r"\[.*", ""))
+        .group_by("n", "block", maintain_order=True)
+        .agg(
+            params=pl.len(),
+            abs_bias=pl.col("bias").abs().mean(),
+            rmse=pl.col("rmse").mean(),
+            se_ratio=(pl.col("boot_se") / pl.col("emp_se")).mean(),
+            cover=pl.col("coverage").mean(),
+            cover_min=pl.col("coverage").min(),
+            cover_max=pl.col("coverage").max(),
         )
-    log(f"Wrote {OUT}/replications.parquet, summary.csv, run.log")
+    )
+    log(f"Results ({N_SIM} replications, {N_BOOT} resamples, nominal {LEVEL}, MC SE {mcse:.4f}):")
+    log(f"{'n':>5}  {'block':<5}{'params':>7}{'|bias|':>9}{'rmse':>8}{'se_ratio':>10}{'cover':>7}{'min':>7}{'max':>7}")
+    for r in blocks.iter_rows(named=True):
+        log(
+            f"{r['n']:>5}  {r['block']:<5}{r['params']:>7}{r['abs_bias']:>9.4f}{r['rmse']:>8.4f}"
+            f"{r['se_ratio']:>10.3f}{r['cover']:>7.3f}{r['cover_min']:>7.3f}{r['cover_max']:>7.3f}"
+        )
+    log(f"Wrote {OUT}/replications.parquet, summary.csv, timing.csv, run.log")
 
 
 if __name__ == "__main__":
