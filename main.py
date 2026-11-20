@@ -53,6 +53,7 @@ def main():
         handlers=[logging.FileHandler(OUT / "run.log", mode="w"), logging.StreamHandler()],
     )
     log = logging.info
+    run_start = time.perf_counter()
 
     design = random_design(D, np.random.default_rng(DESIGN_SEED))
     truth = as_vector(design.truth())
@@ -65,6 +66,7 @@ def main():
     seeds = np.random.SeedSequence(SEED).spawn(len(SAMPLE_SIZES))
     for n, seed in zip(SAMPLE_SIZES, seeds):
         tasks = [(design, n, s) for s in seed.spawn(N_SIM)]
+        n_start = time.perf_counter()
         results = []
         with ProcessPoolExecutor(WORKERS) as pool:
             for result in pool.map(one_replication, tasks, chunksize=10):
@@ -74,9 +76,12 @@ def main():
 
         # Arrays of shape (N_SIM, number of parameters); seconds has shape (N_SIM,).
         est, lower, upper, boot_se, seconds = (np.array(x) for x in zip(*results))
-        log(f"n={n}: {seconds.mean():.2f}s per bootstrap (sd {seconds.std(ddof=1):.2f}s)")
+        wall = time.perf_counter() - n_start    # all N_SIM replications, WORKERS in parallel
+        log(f"n={n}: {seconds.mean():.2f}s per confidence interval (sd {seconds.std(ddof=1):.2f}s), "
+            f"{wall / 60:.1f} min wall-clock for {N_SIM} replications")
         timing.append({"d": D, "n": n, "n_boot": N_BOOT, "mean_s": seconds.mean(),
-                       "sd_s": seconds.std(ddof=1), "median_s": np.median(seconds)})
+                       "sd_s": seconds.std(ddof=1), "median_s": np.median(seconds),
+                       "wall_s": wall, "workers": WORKERS})
 
         replications.append(pl.DataFrame({
             "n": n,
@@ -126,6 +131,7 @@ def main():
             f"{r['n']:>5}  {r['block']:<5}{r['params']:>7}{r['abs_bias']:>9.4f}{r['rmse']:>8.4f}"
             f"{r['se_ratio']:>10.3f}{r['cover']:>7.3f}{r['cover_min']:>7.3f}{r['cover_max']:>7.3f}"
         )
+    log(f"Total run time: {(time.perf_counter() - run_start) / 60:.1f} min")
     log(f"Wrote {OUT}/replications.parquet, summary.csv, timing.csv, run.log")
 
 
